@@ -23,7 +23,7 @@
 
 int g_main_port = 8000; 
 int g_sub_port = 8001;
-char g_target_ip[64] = "127.0.0.1"; // デフォルト値
+char g_target_ip[64] = "127.0.0.1";
 #define MAX_BUFFER_SIZE 2048 
 
 extern wchar_t inputString[Input_StrSize]; 
