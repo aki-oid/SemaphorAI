@@ -748,31 +748,32 @@ int main(int argc, char** argv)
     char* port_str_1 = getenv("MAIN_PORT");
     char* port_str_2 = getenv("SUB_PORT");
 
-    int port1 = 0;
-    int port2 = 0;
-
     // 取得できたかチェックして数値に変換 (atoi)
+// IPアドレス取得
     if (ip_env != NULL) {
         strncpy(g_target_ip, ip_env, sizeof(g_target_ip) - 1);
-    
-        // 念の為、終端文字を入れる
         g_target_ip[sizeof(g_target_ip) - 1] = '\0';
     } else {
-        printf("Warning: PYTHON_IP not found. Using default: %s\n", g_target_ip);
+        printf("Warning: HOST env not found. Using default: %s\n", g_target_ip);
     }
+
+    // MAIN_PORT取得
     if (port_str_1 != NULL) {
         g_main_port = atoi(port_str_1);
     } else {
         printf("Warning: MAIN_PORT not found. Using default: %d\n", g_main_port);
     }
 
+    // SUB_PORT取得
     if (port_str_2 != NULL) {
         g_sub_port = atoi(port_str_2);
     } else {
         printf("Warning: SUB_PORT not found. Using default: %d\n", g_sub_port);
     }
 
-    printf("Port 1: %d\n", port1);
+    // ★修正: ローカル変数(port1)ではなく、グローバル変数(g_main_port)を表示する
+    printf("Settings -> Main Port: %d, Sub Port: %d, Target IP: %s\n", 
+           g_main_port, g_sub_port, g_target_ip);
 
     // 2. スレッド起動
     pthread_t server_thread_id; 
