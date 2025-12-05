@@ -21,6 +21,8 @@
 #include "header/Robot.h"
 #include "header/Story.h"
 
+int g_main_port = 8000; 
+int g_sub_port = 8001;
 #define MAX_BUFFER_SIZE 2048 
 
 extern wchar_t inputString[Input_StrSize]; 
@@ -75,7 +77,7 @@ void send_done_to_python() {
     }
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SUB_PORT);
+    server_addr.sin_port = htons(g_sub_port);
     server_addr.sin_addr.s_addr = inet_addr("192.168.3.64");
 
     // Pythonサーバー(待機中)に接続
@@ -677,7 +679,7 @@ void *socket_server_thread(void *arg) {
     
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(MAIN_PORT);
+    address.sin_port = htons(g_main_port);
     
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Bind failed"); return NULL;
@@ -687,7 +689,7 @@ void *socket_server_thread(void *arg) {
         perror("Listen failed"); return NULL;
     }
     
-    printf(">>> Server Listening on port %d <<<\n", MAIN_PORT);
+    printf(">>> Server Listening on port %d <<<\n", g_main_port);
     
     while(1) {
         // 接続待ち
@@ -749,14 +751,15 @@ int main(int argc, char** argv)
 
     // 取得できたかチェックして数値に変換 (atoi)
     if (port_str_1 != NULL) {
-        port1 = atoi(port_str_1);
+        g_main_port = atoi(port_str_1);
     } else {
-        printf("Error: SOCKET_PORT_MAIN not found in env.\n");
-        // デフォルト値を入れるか、エラー終了する
+        printf("Warning: MAIN_PORT not found. Using default: %d\n", g_main_port);
     }
 
     if (port_str_2 != NULL) {
-        port2 = atoi(port_str_2);
+        g_sub_port = atoi(port_str_2);
+    } else {
+        printf("Warning: SUB_PORT not found. Using default: %d\n", g_sub_port);
     }
 
     printf("Port 1: %d\n", port1);
