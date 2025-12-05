@@ -67,6 +67,37 @@ void mySpecialKey(int key, int x, int y);
 void mySpecialKeyUp(int key, int x, int y);
 void walkAnimation(int value);
 void Beep(unsigned int freq, unsigned int duration);
+
+void load_env() {
+    FILE *file = fopen(".env", "r");
+    if (file == NULL) {
+        printf("Info: .env file not found. Using system environment or defaults.\n");
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        // 改行コード削除
+        line[strcspn(line, "\n")] = 0;
+        
+        // コメント(#)や空行はスキップ
+        if (line[0] == '#' || strlen(line) == 0) continue;
+
+        // '=' で分割
+        char *delimiter = strchr(line, '=');
+        if (delimiter != NULL) {
+            *delimiter = '\0'; // '=' を終端文字に置き換えてキーにする
+            char *key = line;
+            char *value = delimiter + 1;
+
+            // 環境変数にセット (第3引数 1 は上書き許可)
+            setenv(key, value, 1);
+            // printf("Loaded: %s = %s\n", key, value); // デバッグ用
+        }
+    }
+    fclose(file);
+}
+
 void send_done_to_python() {
     int sock;
     struct sockaddr_in server_addr;
@@ -742,6 +773,7 @@ void *socket_server_thread(void *arg) {
 // ==========================================
 int main(int argc, char** argv)
 {
+    load_env();
     setlocale(LC_ALL, ""); 
     
     char* ip_env     = getenv("HOST");
