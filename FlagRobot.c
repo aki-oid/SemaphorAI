@@ -409,7 +409,7 @@ void idle(void)
             wordsFlag = GL_FALSE; 
             revolveFlag = GL_TRUE; 
         }
-        else if(mode == MODE_exit){ // EXITモード: プログラム終了
+        else if(mode == MODE_exit){
             exit(0);
         }
         glutPostRedisplay();
@@ -739,7 +739,7 @@ void *socket_server_thread(void *arg) {
             buffer[valread] = '\0';
             strcat(received_data, buffer);
             if (received_data[strlen(received_data) - 1] == '\n') {
-                received_data[strlen(received_data) - 1] = '\0'; // 改行削除
+                received_data[strlen(received_data) - 1] = '\0';
                 break;
             }
         }
@@ -780,8 +780,7 @@ int main(int argc, char** argv)
     char* port_str_1 = getenv("MAIN_PORT");
     char* port_str_2 = getenv("SUB_PORT");
 
-    // 取得できたかチェックして数値に変換 (atoi)
-// IPアドレス取得
+    // 1. 環境変数取得
     if (ip_env != NULL) {
         strncpy(g_target_ip, ip_env, sizeof(g_target_ip) - 1);
         g_target_ip[sizeof(g_target_ip) - 1] = '\0';
@@ -789,22 +788,18 @@ int main(int argc, char** argv)
         printf("Warning: HOST env not found. Using default: %s\n", g_target_ip);
     }
 
-    // MAIN_PORT取得
     if (port_str_1 != NULL) {
         g_main_port = atoi(port_str_1);
     } else {
         printf("Warning: MAIN_PORT not found. Using default: %d\n", g_main_port);
     }
-
-    // SUB_PORT取得
     if (port_str_2 != NULL) {
         g_sub_port = atoi(port_str_2);
     } else {
         printf("Warning: SUB_PORT not found. Using default: %d\n", g_sub_port);
     }
 
-    // ★修正: ローカル変数(port1)ではなく、グローバル変数(g_main_port)を表示する
-    printf("Settings -> Main Port: %d, Sub Port: %d, Target IP: %s\n", 
+    printf("Settings -> Main Port: %d\n, Sub Port: %d\n, Target IP: %s\n\n", 
            g_main_port, g_sub_port, g_target_ip);
 
     // 2. スレッド起動
