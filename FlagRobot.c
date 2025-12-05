@@ -753,7 +753,10 @@ int main(int argc, char** argv)
 
     // 取得できたかチェックして数値に変換 (atoi)
     if (ip_env != NULL) {
-        g_target_ip = ip_env; // 環境変数の値で上書き
+        strncpy(g_target_ip, ip_env, sizeof(g_target_ip) - 1);
+    
+        // 念の為、終端文字を入れる
+        g_target_ip[sizeof(g_target_ip) - 1] = '\0';
     } else {
         printf("Warning: PYTHON_IP not found. Using default: %s\n", g_target_ip);
     }
