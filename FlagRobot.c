@@ -23,6 +23,7 @@
 
 int g_main_port = 8000; 
 int g_sub_port = 8001;
+char g_target_ip[64] = "127.0.0.1"; // デフォルト値
 #define MAX_BUFFER_SIZE 2048 
 
 extern wchar_t inputString[Input_StrSize]; 
@@ -78,7 +79,7 @@ void send_done_to_python() {
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(g_sub_port);
-    server_addr.sin_addr.s_addr = inet_addr("192.168.3.64");
+    server_addr.sin_addr.s_addr = inet_addr(g_target_ip);
 
     // Pythonサーバー(待機中)に接続
     if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
@@ -743,6 +744,7 @@ int main(int argc, char** argv)
 {
     setlocale(LC_ALL, ""); 
     
+    char* ip_env     = getenv("HOST");
     char* port_str_1 = getenv("MAIN_PORT");
     char* port_str_2 = getenv("SUB_PORT");
 
@@ -750,6 +752,11 @@ int main(int argc, char** argv)
     int port2 = 0;
 
     // 取得できたかチェックして数値に変換 (atoi)
+    if (ip_env != NULL) {
+        g_target_ip = ip_env; // 環境変数の値で上書き
+    } else {
+        printf("Warning: PYTHON_IP not found. Using default: %s\n", g_target_ip);
+    }
     if (port_str_1 != NULL) {
         g_main_port = atoi(port_str_1);
     } else {
