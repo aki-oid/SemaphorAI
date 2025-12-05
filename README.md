@@ -1,6 +1,7 @@
 # 3D Semaphore Signal Simulator
 OpenGLを用いた3D手旗信号シミュレーションツールです。
 コマンドプロンプトから入力された文字列を反映し、3Dキャラクターが手旗信号のアニメーションを行います。
+<img width="1360" height="720" alt="Image" src="https://github.com/user-attachments/assets/e9695810-c1a4-46eb-87c2-3ceda1653cc6" />
 
 ## 1. ソフトウェア概要
 「手旗信号」とは、右手に赤旗、左手に白旗を持って行う視覚通信手段です。
