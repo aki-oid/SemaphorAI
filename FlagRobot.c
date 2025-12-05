@@ -21,8 +21,6 @@
 #include "header/Robot.h"
 #include "header/Story.h"
 
-#define MAIN_PORT 65432
-#define SUB_PORT 65433
 #define MAX_BUFFER_SIZE 2048 
 
 extern wchar_t inputString[Input_StrSize]; 

@@ -98,3 +98,13 @@ OpenGLを用いた3D手旗信号シミュレーションツールです。
 | **通信プロトコル** | TCP/IP Socket |
 | **AIモデル** | GPT-4o-mini (Chat), tts-1 (Audio) |
 | **音声認識** | Google Speech Recognition API |
+
+## 6. セットアップ (Setup)
+
+### 6.1 環境変数の設定 (.env)
+本プロジェクトを実行するには、OpenAIのAPIキーが必要です。
+プロジェクトルートに `.env` ファイルを作成し、以下のように記述してください。
+
+1. `env.example` ファイルをコピーして `.env` にリネームします。
+2. `.env` ファイル内の `OPENAI_API_KEY` にご自身のAPIキーを貼り付けてください。
+3. TCPソケット通信の設定(HOSR, PORT)も、自身の環境に合わせて適宜変更してください。

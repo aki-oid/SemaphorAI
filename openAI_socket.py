@@ -66,17 +66,16 @@ def speak_text(text):
         return
     
     try:
-        # OpenAIの音声合成APIを使用
-        response = client.audio.speech.create(
-            model="tts-1",    # 高速モデル
-            voice="onyx",     # 声の種類: alloy, echo, fable, onyx, nova, shimmer
-            input=text,
-            speed=1.2         # 速度: 1.0が標準。1.2で少し早口（キビキビした教官風）
-        )
-        
-        # 音声ファイルを保存
         speech_file_path = "temp_speech.mp3"
-        response.stream_to_file(speech_file_path)
+        # OpenAIの音声合成APIを使用
+        with client.audio.speech.with_streaming_response.create(
+            model="tts-1",
+            voice="onyx",
+            input=text,
+            speed=1.2
+        ) as response:
+            # ストリーミングとしてファイルに保存
+            response.stream_to_file(speech_file_path)
         
         # 再生 (mpg321を使用)
         os.system(f"mpg321 -q {speech_file_path}")
