@@ -2,7 +2,7 @@
 OpenGLを用いた3D手旗信号シミュレーションツールです。
 コマンドプロンプトから入力された文字列を反映し、3Dキャラクターが手旗信号のアニメーションを行います。
 <img width="1360" height="654" alt="Image" src="https://github.com/user-attachments/assets/a0ad281e-3ada-4d7c-8517-ac223ced45ab" />
-## 1. ソフトウェア概要
+## 1. ソフトウェア概要 
 「手旗信号」とは、右手に赤旗、左手に白旗を持って行う視覚通信手段です。
 本プログラムは、海兵学校の手旗信号教官をイメージしたロボット「ロボタ」が、ユーザーの入力した文字列を手旗信号に変換して伝達します。
 また、文字入力はキーボード・マウスに対応し、旗を持った状態でも入力可能となります。
@@ -111,10 +111,15 @@ OpenGLを用いた3D手旗信号シミュレーションツールです。
 
 ### 6.2 ライブラリの準備
 以下のコマンドで仮想環境を作成し、必要なライブラリを一括インストールしてください。
-1. 仮想環境の作成と有効化
-    python -m venv venv
-    .\venv\Scripts\activate
-2. pipのアップグレード
-    python -m pip install --upgrade pip
-3. 依存ライブラリのインストール
-    pip install -r requirements.txt
+
+```powershell
+# 1. 仮想環境の作成と有効化
+python -m venv venv
+.\venv\Scripts\activate
+# ※Linux / Macの場合は: source venv/bin/activate
+
+# 2. pipのアップグレード
+python -m pip install --upgrade pip
+
+# 3. 依存ライブラリのインストール
+pip install -r requirements.txt
