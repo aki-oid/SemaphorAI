@@ -108,3 +108,13 @@ OpenGLを用いた3D手旗信号シミュレーションツールです。
 1. `env.example` ファイルをコピーして `.env` にリネームします。
 2. `.env` ファイル内の `OPENAI_API_KEY` にご自身のAPIキーを貼り付けてください。
 3. TCPソケット通信の設定(HOSR, PORT)もデフォルトでも使えますが、自身の環境に合わせて適宜変更してください。
+
+### 6.2 ライブラリの準備
+以下のコマンドで仮想環境を作成し、必要なライブラリを一括インストールしてください。
+**1.** 仮想環境の作成と有効化
+python -m venv venv
+.\venv\Scripts\activate
+**2.** pipのアップグレード
+python -m pip install --upgrade pip
+**3.** 依存ライブラリのインストール
+pip install -r requirements.txt
