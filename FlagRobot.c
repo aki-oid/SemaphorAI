@@ -8,6 +8,12 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 
+#include "header/read_bitmap.h"
+#include "header/myShape.h"
+#include "header/Hiragana_Flag.h"
+#include "header/Robot.h"
+
+//------------------------------↓ソケット通信用↓------------------------------
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
@@ -20,26 +26,21 @@ typedef int socklen_t;
 #define sleep(x) Sleep((x)*1000)
 #define usleep(x) Sleep((x)/1000)
 
-#include "header/read_bitmap.h"
-#include "header/myShape.h"
-#include "header/Hiragana_Flag.h"
-#include "header/Robot.h"
-#include "header/Story.h"
-
+#define MAX_BUFFER_SIZE 2048 
 int g_main_port = 8000; 
 int g_sub_port = 8001;
 char g_target_ip[64] = "127.0.0.1";
-#define MAX_BUFFER_SIZE 2048 
+
+// ★ 排他制御とスレッド関連変数
+CRITICAL_SECTION data_mutex; // Windows用クリティカルセクション
+volatile int data_received_flag = 0; // データ受信通知用フラグ
+
+//------------------------------↑ソケット通信用↑------------------------------
 
 extern wchar_t inputString[Input_StrSize]; 
 extern unsigned char wordsFlag;
 extern unsigned char revolveFlag;
 extern int mode;
-
-// ★ 排他制御とスレッド関連変数
-CRITICAL_SECTION data_mutex; // Windows用クリティカルセクション
-
-volatile int data_received_flag = 0; // データ受信通知用フラグ
 
 #define KEY_ESC 27
 #define XYZ_NUM 3
@@ -72,30 +73,6 @@ void initTexture();
 void mySpecialKey(int key, int x, int y);
 void mySpecialKeyUp(int key, int x, int y);
 void walkAnimation(int value);
-#ifndef _WIN32  // Beep関数はWindows.hに含まれるため、Linuxの場合のみ定義が必要
-    void Beep(unsigned int freq, unsigned int duration);
-#endif
-
-#ifndef _WIN32
-#include <time.h>
-#include <sys/time.h>
-#include <unistd.h>
-
-// Linux環境でのダミーのBeep関数
-void Beep(unsigned int freq, unsigned int duration) {
-    // duration (ミリ秒)だけ待機
-    usleep(duration * 1000); 
-}
-#endif // _WIN32 の終了
-
-// ★ ロック関数のラッパー
-void my_mutex_lock() {
-    EnterCriticalSection(&data_mutex);
-}
-
-void my_mutex_unlock() {
-    LeaveCriticalSection(&data_mutex);
-}
 
 void load_env() {
     FILE *file = fopen(".env", "r");
@@ -125,6 +102,77 @@ void load_env() {
     }
     fclose(file);
 }
+// ==========================================
+//  ソケットサーバー用スレッド関数
+// ==========================================
+unsigned __stdcall socket_server_thread(void *arg){
+
+    int server_fd, new_socket;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+    char buffer[MAX_BUFFER_SIZE] = {0};
+    
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket failed"); return 0;
+    }
+    
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(g_main_port);
+    
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("Bind failed"); return 0;
+    }
+    
+    if (listen(server_fd, 5) < 0) {
+        perror("Listen failed"); return 0;
+    }
+    
+    printf(">>> Server Listening on port %d <<<\n", g_main_port);
+    
+    while(1) {
+        // 接続待ち
+        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+            perror("Accept failed"); continue;
+        }
+        
+        // データ受信ループ
+        char received_data[MAX_BUFFER_SIZE] = {0};
+        int valread;
+        
+            while ((valread = recv(new_socket, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
+        
+            buffer[valread] = '\0';
+            strcat(received_data, buffer);
+            if (received_data[strlen(received_data) - 1] == '\n') {
+                received_data[strlen(received_data) - 1] = '\0';
+                break;
+            }
+        }
+        
+        if (strlen(received_data) > 0) {
+            printf("あなた: %s\n", received_data);
+            EnterCriticalSection(&data_mutex);
+            
+            // UTF-8 -> ワイド文字変換
+            mbstowcs(inputString, received_data, Input_StrSize);
+            
+            // 受信フラグを立てる
+            data_received_flag = 1;
+            LeaveCriticalSection(&data_mutex);
+        }
+        
+        closesocket(new_socket);
+        printf("Client Disconnected.\n");
+    }
+    
+    closesocket(server_fd);
+
+    return 0;
+}
 
 void send_done_to_python() {
     int sock;
@@ -147,14 +195,15 @@ void send_done_to_python() {
         return;
     }
 
-    // データ送信（中身は何でも良い）
     char *msg = "DONE";
     send(sock, msg, strlen(msg), 0);
     
     close(sock);
-    // printf("DEBUG: Sent DONE signal to Python.\n");
 }
 
+// ==========================================
+//  描画　関数
+// ==========================================
 void display(void)
 {
 	glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -399,7 +448,7 @@ void drawString(char *str, float x0,float y0, double w, double h) {
 void idle(void)
 {
     // 1. ソケットからのデータ受信をチェック
-    my_mutex_lock(); // ★ ラッパー関数を使用
+    EnterCriticalSection(&data_mutex);
     if (data_received_flag == 1) {
         data_received_flag = 0;
         
@@ -442,7 +491,7 @@ void idle(void)
         }
         glutPostRedisplay();
     }
-    my_mutex_unlock();
+    LeaveCriticalSection(&data_mutex);
 
     // 2. 手旗信号アニメーション処理
     if(mode == MODE_flag && wordsFlag == TRUE){
@@ -462,13 +511,11 @@ void idle(void)
             }
             if(inputString[str_num] == L'\0'){
                 Beep(1320, 400); 
-                Story_selif(1);
                 printf("\nAnimation Finished: %ls\n", inputString);
                 
                 // アニメーション終了
                 wordsFlag = GL_FALSE; 
                 
-                // ★ Pythonへ完了通知を送る
                 send_done_to_python();
             }
         }
@@ -520,7 +567,6 @@ void myKbd( unsigned char key, int x, int y )
             break;
         case 'c':
             if(mode==MODE_walking)
-                Story_selif2("(お散歩。。。)\n新人！もう走り込みは終わったか？\nそろそろ本題へ移るか");
                 mode = MODE_select;
             break;
         case ' ':
@@ -531,7 +577,6 @@ void myKbd( unsigned char key, int x, int y )
                 glutIdleFunc(NULL);//アニメーションをとめる
             break;
         case KEY_ESC:
-            Story_selif2("以上で本講義を終わりにする！解散！");
             exit( 0 );
     }
 }
@@ -600,18 +645,12 @@ void initTexture(void)
         {"bmp/body2.bmp", NULL, 0, 0}
     };
 
-    //printf("DEBUG: [5] initTexture Start (Reading %d files).\n", TEXTURE_NUM); // ★ログ5
-
     for (int i = 0; i < TEXTURE_NUM; i++) {
-        //printf("DEBUG: [6] Reading file: %s\n", textures[i].filename); // ★ログ6
-        
         if (!ReadBitMapData((char *)textures[i].filename, &textures[i].width, &textures[i].height, &textures[i].image)) {
             // テクスチャファイルが見つからない場合に安全に終了し、クラッシュを防ぐ
             fprintf(stderr, "FATAL ERROR: BMP file not found or failed to load: %s\n", textures[i].filename);
             exit(1); 
         }
-
-        //printf("DEBUG: [7] File %s loaded successfully. Applying texture.\n", textures[i].filename); // ★ログ7
 
         glBindTexture(GL_TEXTURE_2D, i + 1); // テクスチャIDは1から
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -622,13 +661,10 @@ void initTexture(void)
                      GL_RGBA, GL_UNSIGNED_BYTE, textures[i].image);
         glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     }
-    //printf("DEBUG: [8] All textures processed.\n"); // ★ログ8
 }
 
 void myInit (char *progname)
 {
-    //printf("DEBUG: [1] myInit Start.\n"); // ★ログ1
-
     glutInitWindowPosition(0, 0);
     glutInitWindowSize( 500, 450);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
@@ -640,12 +676,7 @@ void myInit (char *progname)
     glutMotionFunc( myMotion );
     resetview();
     
-    //printf("DEBUG: [2] Calling initTexture().\n"); // ★ログ2
     initTexture();
-    //printf("DEBUG: [3] initTexture() returned successfully.\n"); // ★ログ3 (ここに到達すればテクスチャ読み込み成功)
-    
-    Story_selif2("よく来た新人！\nここは海兵手旗信号講座の会場である！！\nここに来てくれたこと心嬉しく思う！！");
-    Story_selif2("新人には2つ選択肢がある！！！\n1つ目は早速「手旗信号講座」、\n2つ目はウォーミングアップとしての「走り込み」、\n最後3つ目は「対話・相談」だ");
     glShadeModel( GL_SMOOTH );
     glEnable( GL_LIGHT0 );
     Round_List = createRound();
@@ -675,7 +706,6 @@ void myInit (char *progname)
             Arm_LR[RIGHT].xyz_def[1][i_xyz] = flag_locate[7][RIGHT][i_xyz];
         }
     }
-    //printf("DEBUG: [4] myInit End.\n"); // ★ログ4
 }
 
 void myReshape(int width, int height)
@@ -709,90 +739,6 @@ void resetview( void )
     robot_pos[2] = 0;         // Zプラス方向へ後退
 }
 
-
-// ==========================================
-//  ソケットサーバー用スレッド関数
-// ==========================================
-
-unsigned __stdcall socket_server_thread(void *arg){
-
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    char buffer[MAX_BUFFER_SIZE] = {0};
-    
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed"); return 0;
-    }
-    
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-    
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(g_main_port);
-    
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed"); return 0;
-    }
-    
-    if (listen(server_fd, 5) < 0) {
-        perror("Listen failed"); return 0;
-    }
-    
-    printf(">>> Server Listening on port %d <<<\n", g_main_port);
-    
-    while(1) {
-        // 接続待ち
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("Accept failed"); continue;
-        }
-        
-        // データ受信ループ
-        char received_data[MAX_BUFFER_SIZE] = {0};
-        int valread;
-        
-            while ((valread = recv(new_socket, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
-        
-            buffer[valread] = '\0';
-            strcat(received_data, buffer);
-            if (received_data[strlen(received_data) - 1] == '\n') {
-                received_data[strlen(received_data) - 1] = '\0';
-                break;
-            }
-        }
-        
-        if (strlen(received_data) > 0) {
-            printf("あなた: %s\n", received_data);
-            
-
-            EnterCriticalSection(&data_mutex);
-
-            
-            // UTF-8 -> ワイド文字変換
-            mbstowcs(inputString, received_data, Input_StrSize);
-            
-            // 受信フラグを立てる
-            data_received_flag = 1;
-            
-            LeaveCriticalSection(&data_mutex);
-            
-        }
-        
-        // ★ 修正3: Windowsでは close ではなく closesocket
-        closesocket(new_socket);
-
-        printf("Client Disconnected.\n");
-    }
-    
-    closesocket(server_fd);
-
-    return 0;
-}
-
-// ==========================================
-//  メイン関数
-// ==========================================
 int main(int argc, char** argv)
 {
     load_env();
