@@ -111,10 +111,10 @@ OpenGLを用いた3D手旗信号シミュレーションツールです。
 
 ### 6.2 ライブラリの準備
 以下のコマンドで仮想環境を作成し、必要なライブラリを一括インストールしてください。
-**1.** 仮想環境の作成と有効化
+# 1. 仮想環境の作成と有効化
 python -m venv venv
 .\venv\Scripts\activate
-**2.** pipのアップグレード
+# 2. pipのアップグレード
 python -m pip install --upgrade pip
-**3.** 依存ライブラリのインストール
+# 3. 依存ライブラリのインストール
 pip install -r requirements.txt
