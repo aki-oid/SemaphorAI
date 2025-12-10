@@ -1,13 +1,21 @@
 import socket
 import sys
 import os
+import time
 from dotenv import load_dotenv
-from playsound import playsound
 from openai import OpenAI
 
 import unicodedata  # 追加: 全角→半角変換用
 import speech_recognition as sr  # 追加: 音声認識用
 from gtts import gTTS #追加: 音声合成用ライブラリ
+import pygame
+pygame.mixer.init()
+
+import sys
+import io
+
+sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 load_dotenv()
 # --- ソケット設定 ---
@@ -68,7 +76,9 @@ def speak_text(text):
         return
     
     try:
-        speech_file_path = "temp_speech.mp3"
+        # ファイルパスを絶対パスで指定するとトラブルが少ない
+        speech_file_path = os.path.abspath("temp_speech.mp3")
+
         # OpenAIの音声合成APIを使用
         with client.audio.speech.with_streaming_response.create(
             model="tts-1",
@@ -76,11 +86,22 @@ def speak_text(text):
             input=text,
             speed=1.2
         ) as response:
-            # ストリーミングとしてファイルに保存
             response.stream_to_file(speech_file_path)
         
-        # 再生 (mpg321を使用)
-        playsound("speech_file_path")
+        # --- 再生処理 (Pygameを使用) ---
+        # 以前の音楽がロードされていたら解放
+        pygame.mixer.music.unload()
+        
+        # ロードして再生
+        pygame.mixer.music.load(speech_file_path)
+        pygame.mixer.music.play()
+
+        # 再生が終わるまで待機（これをしないと次の処理に進んで音が途切れる）
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.1)
+            
+        # 再生終了後にファイルを解放（次の上書きのため）
+        pygame.mixer.music.unload()
     except Exception as e:
         print(f"[ERROR] 音声再生エラー: {e}")
 
@@ -152,7 +173,7 @@ def get_system_prompt(mode):
                 "変換ルール１、小文字の「や,ゆ,よ,つ,あ行」などは大文字に変換してください。"
                 "変換ルール２、記号は取り除いてください。"
                 "変換ルール３、入力されたカタカナ漢字は全てひらがなに変換してください。"
-                "必ずひらがなで出力します"
+                "必ず入力された文字列のみ、ひらがなで出力します"
         }
     elif mode == Mode.TALKING:
         return {
