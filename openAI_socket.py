@@ -1,6 +1,7 @@
 import socket
 import sys
 import os
+import io
 import time
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -10,9 +11,6 @@ import speech_recognition as sr  # 追加: 音声認識用
 from gtts import gTTS #追加: 音声合成用ライブラリ
 import pygame
 pygame.mixer.init()
-
-import sys
-import io
 
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
