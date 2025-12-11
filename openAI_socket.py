@@ -43,29 +43,30 @@ def recognize_speech():
         print("\n[ERROR] マイクが見つかりません。")
         return None
 
+    print("\t(マイク準備中...)")
     with mic as source:
-        print("\n(音声を待機中... 話しかけてください)")
         # 周囲の雑音レベルを調整
-        r.adjust_for_ambient_noise(source)
+        r.adjust_for_ambient_noise(source, duration=1)
+        print("\t(話しかけてください)",flush=True)
         try:
             # 録音開始（5秒間無音ならタイムアウト）
             audio = r.listen(source, timeout=5.0, phrase_time_limit=10.0)
-            print("(認識中...)")
+            print("\t(認識中...)")
             # Googleの音声認識サーバーを使用（日本語）
             text = r.recognize_google(audio, language='ja-JP')
-            print(f"音声認識結果: {text}")
+            print(f"あなた: {text}")
             return text
         except sr.WaitTimeoutError:
-            print("[INFO] 音声が検出されませんでした。")
+            print("\t[INFO] 音声が検出されませんでした。")
             return None
         except sr.UnknownValueError:
-            print("[INFO] 言葉を聞き取れませんでした。")
+            print("\t[INFO] 言葉を聞き取れませんでした。")
             return None
         except sr.RequestError:
-            print("[ERROR] 音声認識サービスに接続できません。ネットワークを確認してください。")
+            print("\t[ERROR] 音声認識サービスに接続できません。ネットワークを確認してください。")
             return None
         except Exception as e:
-            print(f"[ERROR] 音声認識エラー: {e}")
+            print(f"\t[ERROR] 音声認識エラー: {e}")
             return None
 
 def speak_text(text):
@@ -196,7 +197,7 @@ def session_loop(mode):
 
     while True:
         try:
-            user_input = input("\nあなた (Enterで音声入力) > ").strip()
+            user_input = input("\n\nあなた (Enterで音声入力) > ").strip()
         except KeyboardInterrupt:
             print("\n強制終了")
             break

@@ -502,7 +502,7 @@ void idle(void)
         }
         idling++;
         printf("Debug: idling = %d\n", idling);
-        if(idling == 30){
+        if(idling == 100){
             idling = 0;
             motion_num++; 
             if((motion_num >= 5)||(get_coordinates_xyz_from_char(RIGHT, str_num, motion_num, X) == -100)){
