@@ -8,39 +8,68 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 
-#include "header/read_bitmap.h"
 #include "header/myShape.h"
 #include "header/Hiragana_Flag.h"
 #include "header/Robot.h"
 
-//------------------------------↓ソケット通信用↓------------------------------
-#include <winsock2.h>
-#include <windows.h>
-#include <ws2tcpip.h>
-#include <process.h> // _beginthreadex
-#pragma comment(lib, "ws2_32.lib") // Winsockライブラリのリンク
-#pragma warning(disable:4996) // 古い関数の警告を無視
+//------------------------------↓ソケット通信・スレッド用↓------------------------------
+#ifdef _WIN32
+	#include "header/read_bitmap.h"
+	#include <winsock2.h>
+	#include <ws2tcpip.h>
+	#include <windows.h>
+	#include <process.h> // Windows環境でもMinGW等のpthread使用を想定
+	#pragma comment(lib, "ws2_32.lib") // MSVC用
+	#pragma warning(disable:4996) // 古い関数の警告を無視
+	#define closesocket closesocket
+	
+	int idling_num = 100;
+#else
+	#include "[Linux]/header/read_bitmap.h"
+	#include <sys/socket.h>
+	#include <netinet/in.h>
+	#include <unistd.h>
+	#include <pthread.h> 
+	#include <arpa/inet.h>
+	#include <time.h>
+	#include <sys/time.h>
 
-typedef int socklen_t;
-#define close closesocket
-#define sleep(x) Sleep((x)*1000)
-#define usleep(x) Sleep((x)/1000)
+	typedef int SOCKET;
+	#define INVALID_SOCKET -1
+	#define SOCKET_ERROR -1
+	#define closesocket close
+
+	int idling_num = 30;
+#endif
 
 #define MAX_BUFFER_SIZE 2048 
 int g_main_port = 8000; 
 int g_sub_port = 8001;
 char g_target_ip[64] = "127.0.0.1";
 
-// ★ 排他制御とスレッド関連変数
-CRITICAL_SECTION data_mutex; // Windows用クリティカルセクション
-volatile int data_received_flag = 0; // データ受信通知用フラグ
-
-//------------------------------↑ソケット通信用↑------------------------------
-
 extern wchar_t inputString[Input_StrSize]; 
 extern unsigned char wordsFlag;
 extern unsigned char revolveFlag;
 extern int mode;
+
+// ★ 排他制御とフラグ
+#ifdef _WIN32
+	CRITICAL_SECTION data_mutex; // Windows環境ではCRITICAL_SECTIONを使用
+#else
+	pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER; // データの保護用キー
+#endif
+volatile int data_received_flag = 0; // データ受信通知用フラグ
+
+//------------------------------↑ソケット通信・スレッド用↑------------------------------
+
+// スレッド関数の型と戻り値をOSごとにマクロ化する
+#ifdef _WIN32
+	#define THREAD_FUNC_TYPE unsigned __stdcall
+	#define THREAD_RETURN_VAL 0
+#else
+	#define THREAD_FUNC_TYPE void *
+	#define THREAD_RETURN_VAL NULL
+#endif
 
 #define KEY_ESC 27
 #define XYZ_NUM 3
@@ -73,136 +102,162 @@ void initTexture();
 void mySpecialKey(int key, int x, int y);
 void mySpecialKeyUp(int key, int x, int y);
 void walkAnimation(int value);
+#ifndef _WIN32
+	void Beep(unsigned int freq, unsigned int duration);
+#endif
 
 void load_env() {
-    FILE *file = fopen(".env", "r");
-    if (file == NULL) {
-        printf("Info: .env file not found. Using system environment or defaults.\n");
-        return;
-    }
+	FILE *file = fopen(".env", "r");
+	if (file == NULL) {
+		printf("Info: .env file not found. Using system environment or defaults.\n");
+		return;
+	}
 
-    char line[256];
-    while (fgets(line, sizeof(line), file)) {
-        // 改行コード削除
-        line[strcspn(line, "\n")] = 0;
-        
-        // コメント(#)や空行はスキップ
-        if (line[0] == '#' || strlen(line) == 0) continue;
+	char line[256];
+	while (fgets(line, sizeof(line), file)) {
+		// 改行コード削除
+		line[strcspn(line, "\n")] = 0;
+		
+		// コメント(#)や空行はスキップ
+		if (line[0] == '#' || strlen(line) == 0) continue;
 
-        // '=' で分割
-        char *delimiter = strchr(line, '=');
-        if (delimiter != NULL) {
-            *delimiter = '\0'; // '=' を終端文字に置き換えてキーにする
-            char *key = line;
-            char *value = delimiter + 1;
-            
-            _putenv_s(key, value);
+		// '=' で分割
+		char *delimiter = strchr(line, '=');
+		if (delimiter != NULL) {
+			*delimiter = '\0'; // '=' を終端文字に置き換えてキーにする
+			char *key = line;
+			char *value = delimiter + 1;
 
-        }
-    }
-    fclose(file);
+			// 環境変数にセット
+			#ifdef _WIN32
+				char env_buf[512];
+				snprintf(env_buf, sizeof(env_buf), "%s=%s", key, value);
+				_putenv(env_buf);
+			#else
+				setenv(key, value, 1);
+			#endif
+		}
+	}
+	fclose(file);
 }
 // ==========================================
 //  ソケットサーバー用スレッド関数
 // ==========================================
-unsigned __stdcall socket_server_thread(void *arg){
+#ifdef _WIN32
+unsigned __stdcall socket_server_thread(void *arg)
+#else
+void *socket_server_thread(void *arg)
+#endif
+{
+	int server_fd, new_socket;
+	struct sockaddr_in address;
+	int addrlen = sizeof(address);
+	char buffer[MAX_BUFFER_SIZE] = {0};
 
-    int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
-    char buffer[MAX_BUFFER_SIZE] = {0};
-    
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("Socket failed"); return 0;
-    }
-    
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-    
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(g_main_port);
-    
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("Bind failed"); return 0;
-    }
-    
-    if (listen(server_fd, 5) < 0) {
-        perror("Listen failed"); return 0;
-    }
-    
-    printf(">>> Server Listening on port %d <<<\n", g_main_port);
-    
-    while(1) {
-        // 接続待ち
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("Accept failed"); continue;
-        }
-        
-        // データ受信ループ
-        char received_data[MAX_BUFFER_SIZE] = {0};
-        int valread;
-        
-            while ((valread = recv(new_socket, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
-        
-            buffer[valread] = '\0';
-            strcat(received_data, buffer);
-            if (received_data[strlen(received_data) - 1] == '\n') {
-                received_data[strlen(received_data) - 1] = '\0';
-                break;
-            }
-        }
-        
-        if (strlen(received_data) > 0) {
-            printf("あなた: %s\n", received_data);
-            EnterCriticalSection(&data_mutex);
-            
-            // UTF-8 -> ワイド文字変換
-            mbstowcs(inputString, received_data, Input_StrSize);
-            
-            // 受信フラグを立てる
-            data_received_flag = 1;
-            LeaveCriticalSection(&data_mutex);
-        }
-        
-        closesocket(new_socket);
-        printf("Client Disconnected.\n");
-    }
-    
-    closesocket(server_fd);
+	if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+		perror("Socket failed"); return THREAD_RETURN_VAL;
+	}
+	int opt = 1;
+#ifdef _WIN32
+	setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
+	setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+		
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = INADDR_ANY;
+	address.sin_port = htons(g_main_port);
+	
+	if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+		perror("Bind failed"); return THREAD_RETURN_VAL;
+	}
+	if (listen(server_fd, 5) < 0) {
+		perror("Listen failed"); return THREAD_RETURN_VAL;
+	}
 
-    return 0;
+	
+	printf(">>> Server Listening on port %d <<<\n", g_main_port);
+	
+	while(1) {
+		// 接続待ち
+		if ((new_socket = accept(server_fd, (struct sockaddr *)&address, &addrlen)) == INVALID_SOCKET) {
+			perror("Accept failed"); continue;
+		}
+		
+		// データ受信ループ
+		char received_data[MAX_BUFFER_SIZE] = {0};
+		int valread;
+		
+		// recv は Windows/Linux 両対応
+		while ((valread = recv(new_socket, buffer, MAX_BUFFER_SIZE - 1, 0)) > 0) {
+			buffer[valread] = '\0';
+			strcat(received_data, buffer);
+			if (received_data[strlen(received_data) - 1] == '\n') {
+				received_data[strlen(received_data) - 1] = '\0';
+				break;
+			}
+		}
+		
+		if (strlen(received_data) > 0) {
+			printf("あなた: %s\n", received_data);
+			
+			// ★ 排他制御区間開始
+			#ifdef _WIN32
+				EnterCriticalSection(&data_mutex);
+			#else
+				pthread_mutex_lock(&data_mutex);
+			#endif
+			
+			// UTF-8 -> ワイド文字変換
+			mbstowcs(inputString, received_data, Input_StrSize);
+			
+			// 受信フラグを立てる
+			data_received_flag = 1;
+			
+			#ifdef _WIN32
+				LeaveCriticalSection(&data_mutex);
+			#else
+				pthread_mutex_unlock(&data_mutex);
+			#endif
+			// ★ 排他制御区間終了
+		}
+		
+		closesocket(new_socket);
+		printf("Client Disconnected.\n");
+	}
+	
+	closesocket(server_fd);
+	return THREAD_RETURN_VAL;
 }
 
 void send_done_to_python() {
-    int sock;
-    struct sockaddr_in server_addr;
+	int sock;
+	struct sockaddr_in server_addr;
 
-    // ソケット作成
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Sync Socket creation error");
-        return;
-    }
+	// ソケット作成
+	if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		perror("Sync Socket creation error");
+		return;
+	}
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(g_sub_port);
-    server_addr.sin_addr.s_addr = inet_addr(g_target_ip);
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_port = htons(g_sub_port);
+	server_addr.sin_addr.s_addr = inet_addr(g_target_ip);
 
-    // Pythonサーバー(待機中)に接続
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        // Python側が待機していない場合(モード切替時など)は無視してOK
-        close(sock);
-        return;
-    }
+	// Pythonサーバー(待機中)に接続
+	if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+		closesocket(sock);
+		return;
+	}
 
-    char *msg = "DONE";
-    send(sock, msg, strlen(msg), 0);
-    
-    close(sock);
+	char *msg = "DONE";
+	send(sock, msg, strlen(msg), 0);
+	
+	closesocket(sock);
 }
 
 // ==========================================
-//  描画　関数
+//  描画 関数
 // ==========================================
 void display(void)
 {
@@ -222,7 +277,6 @@ void display(void)
 					glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
 					glColor3f(0.8,0.8,0.8);
 
-					
 					glPushMatrix ();
 						glTranslatef(robot_pos[0], robot_pos[1], robot_pos[2]);
 						glRotatef(robot_angle, 0.0f, 1.0f, 0.0f);
@@ -379,15 +433,15 @@ void display(void)
 			glPopMatrix();
 		glDisable( GL_DEPTH_TEST );
 	glPopMatrix ();
-    
+	
 //文字列表示 (モードに応じて分岐)
-    glPushMatrix();
-        if(wordsFlag==TRUE)
-            drawString(draw_str,50,400,500,500);
-        else
-            drawString("Robo-ta",175,400,500,500);
+	glPushMatrix();
+		if(wordsFlag==TRUE)
+			drawString(draw_str,50,400,500,500);
+		else
+			drawString("Robo-ta",175,400,500,500);
 
-        if (mode == MODE_flag) {
+		if (mode == MODE_flag) {
 			if((revolveFlag==FALSE)&&(wordsFlag==FALSE)){
 				glPushMatrix();//文字
 					drawString("Waiting for input",25,700,750,750);
@@ -397,20 +451,20 @@ void display(void)
 					drawString("STOP",25,700,750,750);
 				glPopMatrix();
 			}
-        } else if (mode == MODE_walking) {
+		} else if (mode == MODE_walking) {
 			glPushMatrix();//文字
 				drawString("Walking",25,700,750,750);
 			glPopMatrix();
-        } else if (mode == MODE_talking) {
+		} else if (mode == MODE_talking) {
 			glPushMatrix();//文字
 				drawString("Talking",25,700,750,750);
 			glPopMatrix();
-        } else {
-            drawString("Waiting for Python...",25,700,750,750);
-        }
-    glPopMatrix();
-    
-    glutSwapBuffers(); 
+		} else {
+			drawString("Waiting for Python...",25,700,750,750);
+		}
+	glPopMatrix();
+	
+	glutSwapBuffers(); 
 }
 
 void drawNormal( float *v0, float *v1 )
@@ -429,16 +483,16 @@ void drawNormal( float *v0, float *v1 )
 	glPopMatrix();
 }
 void drawString(char *str, float x0,float y0, double w, double h) {
-    int i,len;
-    glMatrixMode(GL_PROJECTION); glPushMatrix();
-    glColor3d(1.,0.,0.); glLoadIdentity(); gluOrtho2D(0.,w,0.,h);
-    len = strlen(str);
-    for(i=0;i<len;i++){
-        glRasterPos2f(x0+20*i,y0);
-        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *str);
-        str++;
-    }
-    glPopMatrix(); glMatrixMode(GL_MODELVIEW);
+	int i,len;
+	glMatrixMode(GL_PROJECTION); glPushMatrix();
+	glColor3d(1.,0.,0.); glLoadIdentity(); gluOrtho2D(0.,w,0.,h);
+	len = strlen(str);
+	for(i=0;i<len;i++){
+		glRasterPos2f(x0+20*i,y0);
+		glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *str);
+		str++;
+	}
+	glPopMatrix(); glMatrixMode(GL_MODELVIEW);
 }
 
 // =============================================================
@@ -447,354 +501,388 @@ void drawString(char *str, float x0,float y0, double w, double h) {
 // =============================================================
 void idle(void)
 {
-    // 1. ソケットからのデータ受信をチェック
-    EnterCriticalSection(&data_mutex);
-    if (data_received_flag == 1) {
-        data_received_flag = 0;
-        
-        // inputString: "1:あいうえお"
-        int command_mode = inputString[0] - L'0'; 
-        wchar_t *body_ptr = &inputString[2]; 
-        if (wcslen(inputString) < 3) body_ptr = L"";
+	// 1. ソケットからのデータ受信をチェック
+#ifdef _WIN32
+	EnterCriticalSection(&data_mutex);
+#else
+	pthread_mutex_lock(&data_mutex);
+#endif
+	if (data_received_flag == 1) {
+		data_received_flag = 0;
+		
+		// inputString: "1:あいうえお"
+		int command_mode = inputString[0] - L'0'; 
+		wchar_t *body_ptr = &inputString[2]; 
+		if (wcslen(inputString) < 3) body_ptr = L"";
 
-        mode = command_mode; 
+		mode = command_mode; 
 
-        // 安全に文字列をセット (一時バッファ使用)
-        wchar_t temp_buffer[Input_StrSize];
-        wcscpy(temp_buffer, body_ptr);
-        wcscpy(inputString, temp_buffer);
+		// 安全に文字列をセット (一時バッファ使用)
+		wchar_t temp_buffer[Input_StrSize];
+		wcscpy(temp_buffer, body_ptr);
+		wcscpy(inputString, temp_buffer);
 
-        // 各モードの初期化
-        if (mode == MODE_flag) {
-            if (wcslen(inputString) > 0 && wcscmp(inputString, L"INIT") != 0) {
-                // アニメーション開始トリガー
-                wordsFlag = GL_TRUE;
-                revolveFlag = GL_TRUE;
-                str_num = 0;
-                motion_num = 0;
-                memset(draw_str, 0, sizeof(draw_str));
-                is_walking = FALSE;
-                idling = 0;
-            }
-        }
-        else if (mode == MODE_walking) {
-            wordsFlag = GL_FALSE;
-            is_walking = TRUE;
-            revolveFlag = GL_TRUE; 
-        }
-        else if (mode == MODE_talking) {
-            wordsFlag = GL_FALSE; 
-            revolveFlag = GL_TRUE; 
-        }
-        else if(mode == MODE_exit){
-            exit(0);
-        }
-        glutPostRedisplay();
-    }
-    LeaveCriticalSection(&data_mutex);
+		// 各モードの初期化
+		if (mode == MODE_flag) {
+			if (wcslen(inputString) > 0 && wcscmp(inputString, L"INIT") != 0) {
+				// アニメーション開始トリガー
+				wordsFlag = GL_TRUE;
+				revolveFlag = GL_TRUE;
+				str_num = 0;
+				motion_num = 0;
+				memset(draw_str, 0, sizeof(draw_str));
+				is_walking = FALSE;
+				idling = 0;
+			}
+		}
+		else if (mode == MODE_walking) {
+			wordsFlag = GL_FALSE;
+			is_walking = TRUE;
+			revolveFlag = GL_TRUE; 
+		}
+		else if (mode == MODE_talking) {
+			wordsFlag = GL_FALSE; 
+			revolveFlag = GL_TRUE; 
+		}
+		else if(mode == MODE_exit){
+			exit(0);
+		}
+		glutPostRedisplay();
+	}
+#ifdef _WIN32
+	LeaveCriticalSection(&data_mutex);
+#else
+	pthread_mutex_unlock(&data_mutex);
+#endif
 
-    // 2. 手旗信号アニメーション処理
-    if(mode == MODE_flag && wordsFlag == TRUE){
-        if((motion_num == 0)&&(idling==0)){
-            Beep(1320, 100); 
-            strcat(draw_str, reverse_roma(str_num));
-            wprintf(L" %c ",inputString[str_num]);
-        }
-        idling++;
-        printf("Debug: idling = %d\n", idling);
-        if(idling == 100){
-            idling = 0;
-            motion_num++; 
-            if((motion_num >= 5)||(get_coordinates_xyz_from_char(RIGHT, str_num, motion_num, X) == -100)){
-                str_num++;
-                motion_num = 0;
-            }
-            if(inputString[str_num] == L'\0'){
-                Beep(1320, 400); 
-                printf("\nAnimation Finished: %ls\n", inputString);
-                
-                // アニメーション終了
-                wordsFlag = GL_FALSE; 
-                
-                send_done_to_python();
-            }
-        }
-    }
-    
-    // 再描画が必要な場合のみコールバック
-    if (revolveFlag) {
-        glutPostRedisplay();
-    }
+	// 2. 手旗信号アニメーション処理
+	if(mode == MODE_flag && wordsFlag == TRUE){
+		if((motion_num == 0)&&(idling==0)){
+			Beep(1320, 100); 
+			strcat(draw_str, reverse_roma(str_num));
+			wprintf(L" %c ",inputString[str_num]);
+		}
+		idling++;
+		printf("Debug: idling = %d\n", idling);
+
+		if(idling == idling_num){
+			idling = 0;
+			motion_num++; 
+			if((motion_num >= 5)||(get_coordinates_xyz_from_char(RIGHT, str_num, motion_num, X) == -100)){
+				str_num++;
+				motion_num = 0;
+			}
+			if(inputString[str_num] == L'\0'){
+				Beep(1320, 400); 
+				printf("\nAnimation Finished: %ls\n", inputString);
+				
+				// アニメーション終了
+				wordsFlag = GL_FALSE; 
+				
+				send_done_to_python();
+			}
+		}
+	}
+	
+	// 再描画が必要な場合のみコールバック
+	if (revolveFlag) {
+		glutPostRedisplay();
+	}
 }
 
 void myKbd( unsigned char key, int x, int y )
 {
-    if((mode!=MODE_select)&&((key == 'w') ||(key == 's')||(key == 'd')|| (key == 'a'))){
-        float step = 0.2f;
+	if((mode!=MODE_select)&&((key == 'w') ||(key == 's')||(key == 'd')|| (key == 'a'))){
+		float step = 0.2f;
 
-        if (key == 'w') {
-            robot_pos[2] -= step;
-            if (robot_pos[2]<=-RANGE)
-                robot_pos[2]=-RANGE;
-            robot_angle = 180.0f;
-        } else if (key == 's') {
-            robot_pos[2] += step;
-            if (robot_pos[2]>=RANGE)
-                robot_pos[2]=RANGE;
-            robot_angle = 0.0f;
-        } else if (key == 'd') {
-            robot_pos[0] += step;
-            if (robot_pos[0]>=RANGE)
-                robot_pos[0]=RANGE;
-            robot_angle = 90.0f;
-        } else if (key == 'a') {
-            robot_pos[0] -= step;
-            if (robot_pos[0]<=-RANGE)
-                robot_pos[0]=-RANGE;
-            robot_angle = -90.0f;
-        }
-        is_walking = TRUE;
-        walk_frame = 0;
-        glutTimerFunc(0, walkAnimation, 0);
-        glutPostRedisplay();
-    }
+		if (key == 'w') {
+			robot_pos[2] -= step;
+			if (robot_pos[2]<=-RANGE)
+				robot_pos[2]=-RANGE;
+			robot_angle = 180.0f;
+		} else if (key == 's') {
+			robot_pos[2] += step;
+			if (robot_pos[2]>=RANGE)
+				robot_pos[2]=RANGE;
+			robot_angle = 0.0f;
+		} else if (key == 'd') {
+			robot_pos[0] += step;
+			if (robot_pos[0]>=RANGE)
+				robot_pos[0]=RANGE;
+			robot_angle = 90.0f;
+		} else if (key == 'a') {
+			robot_pos[0] -= step;
+			if (robot_pos[0]<=-RANGE)
+				robot_pos[0]=-RANGE;
+			robot_angle = -90.0f;
+		}
+		is_walking = TRUE;
+		walk_frame = 0;
+		glutTimerFunc(0, walkAnimation, 0);
+		glutPostRedisplay();
+	}
 
-    switch( key ) {
-        case 'R':
-            is_walking = FALSE;
-            resetview();
-            glutPostRedisplay();
-            break;
-        case 'c':
-            if(mode==MODE_walking)
-                mode = MODE_select;
-            break;
-        case ' ':
-            revolveFlag = !revolveFlag;
-            if(revolveFlag == GL_TRUE)
-                glutIdleFunc(idle); //idleを繰り返し実行するように設定
-            else
-                glutIdleFunc(NULL);//アニメーションをとめる
-            break;
-        case KEY_ESC:
-            exit( 0 );
-    }
+	switch( key ) {
+		case 'R':
+			is_walking = FALSE;
+			resetview();
+			glutPostRedisplay();
+			break;
+		case 'c':
+			if(mode==MODE_walking)
+				mode = MODE_select;
+			break;
+		case ' ':
+			revolveFlag = !revolveFlag;
+			if(revolveFlag == GL_TRUE)
+				glutIdleFunc(idle); //idleを繰り返し実行するように設定
+			else
+				glutIdleFunc(NULL);//アニメーションをとめる
+			break;
+		case KEY_ESC:
+			exit( 0 );
+	}
 }
 void myKeyboardUp(unsigned char key, int x, int y) {
-    switch (key) {
-        case 'w':
-        case 'a':
-        case 's':
-        case 'd':
-            is_walking = FALSE;
-            // 足を元の位置に戻す
-            for (int lr = RIGHT; lr <= LEFT; lr++) {
-                for (int i = 0; i < XYZ_NUM; i++) {
-                    Leg_LR[lr].xyz[1][i] = Leg_LR[lr].xyz_def[1][i];
-                }
-            }
-            glutPostRedisplay();
-            break;
-    }
+	switch (key) {
+		case 'w':
+		case 'a':
+		case 's':
+		case 'd':
+			is_walking = FALSE;
+			// 足を元の位置に戻す
+			for (int lr = RIGHT; lr <= LEFT; lr++) {
+				for (int i = 0; i < XYZ_NUM; i++) {
+					Leg_LR[lr].xyz[1][i] = Leg_LR[lr].xyz_def[1][i];
+				}
+			}
+			glutPostRedisplay();
+			break;
+	}
 }
 
 void myMouse(int button, int state, int x, int y)
 {
-    if (((mode==MODE_walking)||(wordsFlag == GL_TRUE))&&(state == GLUT_DOWN)) {
-        xBegin = x;
-        yBegin = y;
-        mButton = button;
-    }
+	if (((mode==MODE_walking)||(wordsFlag == GL_TRUE))&&(state == GLUT_DOWN)) {
+		xBegin = x;
+		yBegin = y;
+		mButton = button;
+	}
 }
 
 void myMotion(int x, int y)
 {
-    if((mode==MODE_walking)||(wordsFlag == GL_TRUE)){
-        int xDisp, yDisp;
-        xDisp = x - xBegin;
-        yDisp = y - yBegin;
-        switch(mButton){
-        case GLUT_LEFT_BUTTON:
-            azimuth += (double) xDisp/2.0;
-            elevation -= (double) yDisp/2.0;
-            break;
-        case GLUT_MIDDLE_BUTTON:
-            twist = fmod (twist + xDisp, 360.0);
-            break;
-        case GLUT_RIGHT_BUTTON:
-            distance -= (double) yDisp/40.0;
-            twist += xDisp/2.0;
-            break;
-        }
-        xBegin = x;
-        yBegin = y;
-        glutPostRedisplay();
-    }
+	if((mode==MODE_walking)||(wordsFlag == GL_TRUE)){
+		int xDisp, yDisp;
+		xDisp = x - xBegin;
+		yDisp = y - yBegin;
+		switch(mButton){
+		case GLUT_LEFT_BUTTON:
+			azimuth += (double) xDisp/2.0;
+			elevation -= (double) yDisp/2.0;
+			break;
+		case GLUT_MIDDLE_BUTTON:
+			twist = fmod (twist + xDisp, 360.0);
+			break;
+		case GLUT_RIGHT_BUTTON:
+			distance -= (double) yDisp/40.0;
+			twist += xDisp/2.0;
+			break;
+		}
+		xBegin = x;
+		yBegin = y;
+		glutPostRedisplay();
+	}
 }
 
 void initTexture(void)
 {
-    struct {
-        const char *filename;
-        unsigned char *image;
-        int width, height;
-    }
-    textures[TEXTURE_NUM] = {
-        {"bmp/face.bmp", NULL, 0, 0},
-        {"bmp/body1.bmp", NULL, 0, 0},
-        {"bmp/body2.bmp", NULL, 0, 0}
-    };
+	struct {
+		const char *filename;
+		unsigned char *image;
+		int width, height;
+	}
+	textures[TEXTURE_NUM] = {
+		{"bmp/face.bmp", NULL, 0, 0},
+		{"bmp/body1.bmp", NULL, 0, 0},
+		{"bmp/body2.bmp", NULL, 0, 0}
+	};
 
-    for (int i = 0; i < TEXTURE_NUM; i++) {
-        if (!ReadBitMapData((char *)textures[i].filename, &textures[i].width, &textures[i].height, &textures[i].image)) {
-            // テクスチャファイルが見つからない場合に安全に終了し、クラッシュを防ぐ
-            fprintf(stderr, "FATAL ERROR: BMP file not found or failed to load: %s\n", textures[i].filename);
-            exit(1); 
-        }
+	for (int i = 0; i < TEXTURE_NUM; i++) {
+		if (!ReadBitMapData((char *)textures[i].filename, &textures[i].width, &textures[i].height, &textures[i].image)) {
+			// テクスチャファイルが見つからない場合に安全に終了し、クラッシュを防ぐ
+			fprintf(stderr, "FATAL ERROR: BMP file not found or failed to load: %s\n", textures[i].filename);
+			exit(1); 
+		}
 
-        glBindTexture(GL_TEXTURE_2D, i + 1); // テクスチャIDは1から
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, 4, textures[i].width, textures[i].height, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, textures[i].image);
-        glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    }
+		glBindTexture(GL_TEXTURE_2D, i + 1); // テクスチャIDは1から
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexImage2D(GL_TEXTURE_2D, 0, 4, textures[i].width, textures[i].height, 0,
+					 GL_RGBA, GL_UNSIGNED_BYTE, textures[i].image);
+		glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	}
 }
 
 void myInit (char *progname)
 {
-    glutInitWindowPosition(0, 0);
-    glutInitWindowSize( 500, 450);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
-    glutCreateWindow(progname);
-    glClearColor (0.0, 0.25, 0.75, 1.0);//背景色
-    glutKeyboardFunc( myKbd );
-    glutKeyboardUpFunc(myKeyboardUp);//通常キーを離したとき
-    glutMouseFunc( myMouse );
-    glutMotionFunc( myMotion );
-    resetview();
-    
-    initTexture();
-    glShadeModel( GL_SMOOTH );
-    glEnable( GL_LIGHT0 );
-    Round_List = createRound();
-    {//各関節座標の初期化
-        Leg_LR[RIGHT].xyz_def[0][X] = -0.75;//脛
-        Leg_LR[RIGHT].xyz_def[0][Y] = 1.5;
-        Leg_LR[RIGHT].xyz_def[0][Z] = 0.0;
-        Leg_LR[RIGHT].xyz_def[1][X] = -1.0;//足先
-        Leg_LR[RIGHT].xyz_def[1][Y] = 0.5;
-        Leg_LR[RIGHT].xyz_def[1][Z] = 0.0;
+	glutInitWindowPosition(0, 0);
+	glutInitWindowSize( 500, 450);
+	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
+	glutCreateWindow(progname);
+	glClearColor (0.0, 0.25, 0.75, 1.0);//背景色
+	glutKeyboardFunc( myKbd );
+	glutKeyboardUpFunc(myKeyboardUp);//通常キーを離したとき
+	glutMouseFunc( myMouse );
+	glutMotionFunc( myMotion );
+	resetview();
+	
+	initTexture();
+	glShadeModel( GL_SMOOTH );
+	glEnable( GL_LIGHT0 );
+	Round_List = createRound();
+	{//各関節座標の初期化
+		Leg_LR[RIGHT].xyz_def[0][X] = -0.75;//脛
+		Leg_LR[RIGHT].xyz_def[0][Y] = 1.5;
+		Leg_LR[RIGHT].xyz_def[0][Z] = 0.0;
+		Leg_LR[RIGHT].xyz_def[1][X] = -1.0;//足先
+		Leg_LR[RIGHT].xyz_def[1][Y] = 0.5;
+		Leg_LR[RIGHT].xyz_def[1][Z] = 0.0;
 
-        Arm_LR[RIGHT].xyz_def[0][X] = -1.0;//肩
-        Arm_LR[RIGHT].xyz_def[0][Y] = 2.5;
-        Arm_LR[RIGHT].xyz_def[0][Z] = 0.25;
+		Arm_LR[RIGHT].xyz_def[0][X] = -1.0;//肩
+		Arm_LR[RIGHT].xyz_def[0][Y] = 2.5;
+		Arm_LR[RIGHT].xyz_def[0][Z] = 0.25;
 
-        for(i_xyz = 0; i_xyz < XYZ_NUM; i_xyz++){
-            Leg_LR[LEFT].xyz_def[0][i_xyz] = Leg_LR[RIGHT].xyz_def[0][i_xyz];
-            Leg_LR[LEFT].xyz_def[1][i_xyz] = Leg_LR[RIGHT].xyz_def[1][i_xyz];
-            Arm_LR[LEFT].xyz_def[0][i_xyz] = Arm_LR[RIGHT].xyz_def[0][i_xyz];
-            if(i_xyz == X){
-                Leg_LR[LEFT].xyz_def[0][i_xyz] *= -1.0;//脛
-                Leg_LR[LEFT].xyz_def[1][i_xyz] *= -1.0;//足先
-                Arm_LR[LEFT].xyz_def[0][i_xyz] *= -1.0;//肩
-            }
+		for(i_xyz = 0; i_xyz < XYZ_NUM; i_xyz++){
+			Leg_LR[LEFT].xyz_def[0][i_xyz] = Leg_LR[RIGHT].xyz_def[0][i_xyz];
+			Leg_LR[LEFT].xyz_def[1][i_xyz] = Leg_LR[RIGHT].xyz_def[1][i_xyz];
+			Arm_LR[LEFT].xyz_def[0][i_xyz] = Arm_LR[RIGHT].xyz_def[0][i_xyz];
+			if(i_xyz == X){
+				Leg_LR[LEFT].xyz_def[0][i_xyz] *= -1.0;//脛
+				Leg_LR[LEFT].xyz_def[1][i_xyz] *= -1.0;//足先
+				Arm_LR[LEFT].xyz_def[0][i_xyz] *= -1.0;//肩
+			}
 
-            Arm_LR[LEFT].xyz_def[1][i_xyz] = flag_locate[1][LEFT][i_xyz];//手首
-            Arm_LR[RIGHT].xyz_def[1][i_xyz] = flag_locate[7][RIGHT][i_xyz];
-        }
-    }
+			Arm_LR[LEFT].xyz_def[1][i_xyz] = flag_locate[1][LEFT][i_xyz];//手首
+			Arm_LR[RIGHT].xyz_def[1][i_xyz] = flag_locate[7][RIGHT][i_xyz];
+		}
+	}
 }
 
 void myReshape(int width, int height)
 {
-    float aspect = (float) width / (float) height;
+	float aspect = (float) width / (float) height;
 
-    glViewport(0, 0, width, height);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(60.0, aspect, 1.0, 100.0);
-    glMatrixMode(GL_MODELVIEW);
+	glViewport(0, 0, width, height);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	gluPerspective(60.0, aspect, 1.0, 100.0);
+	glMatrixMode(GL_MODELVIEW);
 }
 
 void polarview( void )
 {
-    glTranslatef( -robot_pos[0]*2/3, 0.0, -distance);
-    glRotatef( -twist, 0.0, 0.0, 1.0);
-    glRotatef( -elevation, 1.0, 0.0, 0.0);
-    glRotatef( -azimuth, 0.0, 1.0, 0.0);
+	glTranslatef( -robot_pos[0]*2/3, 0.0, -distance);
+	glRotatef( -twist, 0.0, 0.0, 1.0);
+	glRotatef( -elevation, 1.0, 0.0, 0.0);
+	glRotatef( -azimuth, 0.0, 1.0, 0.0);
 }
 
 void resetview( void )
 {
-    distance = RANGE;
-    twist = 0.0;
-    elevation = -15.0;
-    azimuth = 0.0;
+	distance = RANGE;
+	twist = 0.0;
+	elevation = -15.0;
+	azimuth = 0.0;
 
-    robot_angle = 0.0f;         // Z軸負方向を向く
-    robot_pos[0] = 0;         // Xマイナス方向へ移動
-    robot_pos[2] = 0;         // Zプラス方向へ後退
+	robot_angle = 0.0f;         // Z軸負方向を向く
+	robot_pos[0] = 0;         // Xマイナス方向へ移動
+	robot_pos[2] = 0;         // Zプラス方向へ後退
 }
 
+#ifndef _WIN32
+	// Linux環境でのダミーのBeep関数
+	void Beep(unsigned int freq, unsigned int duration) {
+		// duration (ミリ秒)だけ待機
+		usleep(duration * 1000); 
+	}
+#endif
+
+// ==========================================
+//  メイン関数
+// ==========================================
 int main(int argc, char** argv)
 {
-    load_env();
-    setlocale(LC_ALL, ""); 
+#ifdef _WIN32
+	// Windows環境向けのWinsock初期化
+	WSADATA wsaData;
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+		fprintf(stderr, "WSAStartup failed.\n");
+		return 1;
+	}
+	InitializeCriticalSection(&data_mutex);
+#endif
 
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        printf("WSAStartup failed.\n");
-        return 1;
-    }
-    // Mutex初期化
-    InitializeCriticalSection(&data_mutex);
+	load_env();
+	setlocale(LC_ALL, ""); 
+	
+	char* ip_env     = getenv("HOST");
+	char* port_str_1 = getenv("MAIN_PORT");
+	char* port_str_2 = getenv("SUB_PORT");
 
-    char* ip_env     = getenv("HOST");
-    char* port_str_1 = getenv("MAIN_PORT");
-    char* port_str_2 = getenv("SUB_PORT");
+	// 1. 環境変数取得
+	if (ip_env != NULL) {
+		strncpy(g_target_ip, ip_env, sizeof(g_target_ip) - 1);
+		g_target_ip[sizeof(g_target_ip) - 1] = '\0';
+	} else {
+		printf("Warning: HOST env not found. Using default: %s\n", g_target_ip);
+	}
 
-    // 1. 環境変数取得
-    if (ip_env != NULL) {
-        strncpy(g_target_ip, ip_env, sizeof(g_target_ip) - 1);
-        g_target_ip[sizeof(g_target_ip) - 1] = '\0';
-    } else {
-        printf("Warning: HOST env not found. Using default: %s\n", g_target_ip);
-    }
+	if (port_str_1 != NULL) {
+		g_main_port = atoi(port_str_1);
+	} else {
+		printf("Warning: MAIN_PORT not found. Using default: %d\n", g_main_port);
+	}
+	if (port_str_2 != NULL) {
+		g_sub_port = atoi(port_str_2);
+	} else {
+		printf("Warning: SUB_PORT not found. Using default: %d\n", g_sub_port);
+	}
 
-    if (port_str_1 != NULL) {
-        g_main_port = atoi(port_str_1);
-    } else {
-        printf("Warning: MAIN_PORT not found. Using default: %d\n", g_main_port);
-    }
-    if (port_str_2 != NULL) {
-        g_sub_port = atoi(port_str_2);
-    } else {
-        printf("Warning: SUB_PORT not found. Using default: %d\n", g_sub_port);
-    }
+	printf("Settings -> Main Port: %d\n, Sub Port: %d\n, Target IP: %s\n\n", 
+		   g_main_port, g_sub_port, g_target_ip);
 
-    printf("Settings -> Main Port: %d\n, Sub Port: %d\n, Target IP: %s\n\n", 
-           g_main_port, g_sub_port, g_target_ip);
+	// 2. スレッド起動
+	#ifdef _WIN32
+		HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, socket_server_thread, NULL, 0, NULL);
+		if (hThread == 0) {
+			perror("Could not create server thread");
+			return 1;
+		}
+	#else
+		pthread_t server_thread_id; 
+		if (pthread_create(&server_thread_id, NULL, socket_server_thread, NULL) != 0) {
+			perror("Could not create server thread");
+			return 1;
+		}
+	#endif
 
-    // 2. スレッド起動
-    HANDLE hThread = (HANDLE)_beginthreadex(NULL, 0, socket_server_thread, NULL, 0, NULL);
-    if (hThread == 0) {
-        perror("Could not create server thread");
-        return 1;
-    }
+	// 3. GLUT初期化とループ開始
+	glutInit(&argc, argv);
+	myInit(argv[0]);
+	glutReshapeFunc(myReshape);
+	glutDisplayFunc(display);
+	glutIdleFunc(idle);
+	glutMainLoop(); 
 
-    // 3. GLUT初期化とループ開始
-    glutInit(&argc, argv);
-    myInit(argv[0]);
-    glutReshapeFunc(myReshape);
-    glutDisplayFunc(display);
-    glutIdleFunc(idle);
-    glutMainLoop(); 
-
-    // 通常ここには到達しない
-    WSACleanup();
-    DeleteCriticalSection(&data_mutex);
-    return 0;
+#ifdef _WIN32
+	WSACleanup();
+	DeleteCriticalSection(&data_mutex);
+#else
+	// 通常ここには到達しない
+	pthread_cancel(server_thread_id);
+#endif
+	return 0;
 }

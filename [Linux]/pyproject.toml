@@ -1,0 +1,45 @@
+[project]
+name = "challenge"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "aki-oid", email = "hataakisan@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "annotated-types==0.7.0",
+    "anyio==4.11.0",
+    "certifi==2025.10.5",
+    "charset-normalizer==3.4.4",
+    "click==8.1.8",
+    "deprecated==1.3.1",
+    "distro==1.9.0",
+    "gtts==2.5.4",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
+    "httpx==0.28.1",
+    "idna==3.11",
+    "jaconv==0.5.0",
+    "jiter==0.12.0",
+    "openai==2.7.2",
+    "pyaudio==0.2.14",
+    "pydantic==2.12.4",
+    "pydantic-core==2.41.5",
+    "pykakasi==2.3.0",
+    "python-dotenv==1.2.1",
+    "requests==2.32.5",
+    "sniffio==1.3.1",
+    "speechrecognition==3.14.4",
+    "tqdm==4.67.1",
+    "typing-extensions==4.15.0",
+    "typing-inspection==0.4.2",
+    "urllib3==2.5.0",
+    "wrapt==2.3.0",
+]
+
+[project.scripts]
+challenge = "challenge:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

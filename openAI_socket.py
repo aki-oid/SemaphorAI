@@ -3,25 +3,29 @@ import sys
 import os
 import io
 import time
+import unicodedata
 from dotenv import load_dotenv
 from pykakasi import kakasi
 from openai import OpenAI
+import speech_recognition as sr
 
-import unicodedata  # 追加: 全角→半角変換用
-import speech_recognition as sr  # 追加: 音声認識用
-from gtts import gTTS #追加: 音声合成用ライブラリ
-import pygame
-pygame.mixer.init()
+# === OSの判定 ===
+IS_WINDOWS = (os.name == 'nt')
 
-sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+# === Windows環境特有の初期化 ===
+if IS_WINDOWS:
+	import pygame
+	pygame.mixer.init()
+	# コマンドプロンプトの文字化け対策
+	sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+	sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
+# === 環境変数と設定 ===
 load_dotenv()
 # --- ソケット設定 ---
 HOST = os.getenv("HOST")  # ローカルホストアドレス
-MAIN_PORT = int(os.getenv("MAIN_PORT"))        # C言語サーバーが待ち受けるポート番号
-SUB_PORT = int(os.getenv("SUB_PORT"))   # C言語からの完了通知を受け取るポート
-# --------------------
+MAIN_PORT = int(os.getenv("MAIN_PORT", 8000))  # C言語サーバーが待ち受けるポート番号
+SUB_PORT = int(os.getenv("SUB_PORT", 8001))    # C言語からの完了通知を受け取るポート
 
 client = OpenAI()
 
@@ -31,15 +35,13 @@ kks.setMode("J", "H")  # 漢字 -> ひらがな
 kks.setMode("K", "H")  # カタカナ -> ひらがな
 kks.setMode("H", "H")  # ひらがな -> ひらがな
 conv = kks.getConverter()
-# ------------------------
 
 class Mode:
 	FLAG    = "1"      # 手旗信号モード
 	TALKING = "2"      # お話モード
 	WALKING = "3"      # 散策（走り込み）モード
 	EXIT    = "exit"   # 終了
-	
-	CMD_QUIT = "9"     # C言語終了用のシグナル番号（9番を終了合図とする）
+	CMD_QUIT = "9"     # C言語終了用のシグナル番号
 
 def recognize_speech():
 	"""マイクから音声を拾ってテキストに変換する"""
@@ -56,7 +58,7 @@ def recognize_speech():
 	with mic as source:
 		# 周囲の雑音レベルを調整
 		r.adjust_for_ambient_noise(source, duration=1)
-		print("\t(話しかけてください)",flush=True)
+		print("\t(話しかけてください)", flush=True)
 		try:
 			# 録音開始（5秒間無音ならタイムアウト）
 			audio = r.listen(source, timeout=5.0, phrase_time_limit=10.0)
@@ -67,27 +69,21 @@ def recognize_speech():
 			return text
 		except sr.WaitTimeoutError:
 			print("\t[INFO] 音声が検出されませんでした。")
-			return None
 		except sr.UnknownValueError:
 			print("\t[INFO] 言葉を聞き取れませんでした。")
-			return None
 		except sr.RequestError:
 			print("\t[ERROR] 音声認識サービスに接続できません。ネットワークを確認してください。")
-			return None
 		except Exception as e:
 			print(f"\t[ERROR] 音声認識エラー: {e}")
-			return None
+	return None
 
 def speak_text(text):
-	"""テキストを音声に変換して再生する"""
+	"""テキストを音声に変換して再生する（OS自動判別）"""
 	if not text:
 		return
-	
 	try:
-		# ファイルパスを絶対パスで指定するとトラブルが少ない
-		speech_file_path = os.path.abspath("temp_speech.mp3")
+		speech_file_path = os.path.abspath("temp_speech.mp3") if IS_WINDOWS else "temp_speech.mp3"
 
-		# OpenAIの音声合成APIを使用
 		with client.audio.speech.with_streaming_response.create(
 			model="tts-1",
 			voice="onyx",
@@ -96,50 +92,34 @@ def speak_text(text):
 		) as response:
 			response.stream_to_file(speech_file_path)
 		
-		# --- 再生処理 (Pygameを使用) ---
-		# 以前の音楽がロードされていたら解放
-		pygame.mixer.music.unload()
-		
-		# ロードして再生
-		pygame.mixer.music.load(speech_file_path)
-		pygame.mixer.music.play()
-
-		# 再生が終わるまで待機（これをしないと次の処理に進んで音が途切れる）
-		while pygame.mixer.music.get_busy():
-			time.sleep(0.1)
+		# --- OS別の再生処理 ---
+		if IS_WINDOWS:
+			pygame.mixer.music.unload()
+			pygame.mixer.music.load(speech_file_path)
+			pygame.mixer.music.play()
+			while pygame.mixer.music.get_busy():
+				time.sleep(0.1)
+			pygame.mixer.music.unload()
+		else:
+			os.system(f"mpg321 -q {speech_file_path}")
 			
-		# 再生終了後にファイルを解放（次の上書きのため）
-		pygame.mixer.music.unload()
 	except Exception as e:
 		print(f"[ERROR] 音声再生エラー: {e}")
 
-# ------------------------
 def normalize_mode_input(text):
-	"""
-	音声や全角入力を半角数字のモードIDに変換する
-	例: "１"->"1", "いち"->"1", "手旗"->"1", "終了"->"exit"
-	"""
+	"""音声や全角入力を半角数字のモードIDに変換する"""
 	if not text:
 		return ""
-	
-	# 1. 全角英数字を半角に変換 (例: "１" -> "1")
-	text = unicodedata.normalize('NFKC', text)
-	text = text.strip()
+	text = unicodedata.normalize('NFKC', text).strip()
 
-	# 2. キーワードマッピング (音声で入力されそうな言葉)
-	# モード1
 	if text in ["1", "一", "いち", "イチ", "手旗", "手旗信号", "ワン", "one"]:
 		return Mode.FLAG
-	# モード2
 	if text in ["2", "二", "に", "ニ", "対話", "相談", "ツー", "two"]:
 		return Mode.TALKING
-	# モード3
 	if text in ["3", "三", "さん", "サン", "走り込み", "走る","スリー" , "three"]:
 		return Mode.WALKING
-	# 終了
 	if text in ["exit", "終了", "終わり", "ストップ", "バイバイ"]:
 		return Mode.EXIT
-
 	return text
 
 def send_to_c_server(text, mode):
@@ -149,10 +129,13 @@ def send_to_c_server(text, mode):
 
 	data_to_send = f"{mode}:{text}".strip() + "\n"
 
+	# WindowsのCプログラム(mbstowcs)はCP932、LinuxはUTF-8を想定
+	encode_type = 'cp932' if IS_WINDOWS else 'utf-8'
+
 	try:
 		with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
 			s.connect((HOST, MAIN_PORT))
-			s.sendall(data_to_send.encode('cp932', errors='replace'))
+			s.sendall(data_to_send.encode(encode_type, errors='replace'))
 	except Exception as e:
 		print(f"\n[ERROR] Cサーバー通信エラー: {e}", file=sys.stderr)
 
@@ -163,8 +146,7 @@ def wait_for_c_animation():
 			s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 			s.bind((HOST, SUB_PORT))
 			s.listen(1)
-			s.settimeout(60.0) # アニメーションが長い場合に備えて長めに
-			
+			s.settimeout(60.0)
 			conn, addr = s.accept()
 			with conn:
 				conn.recv(1024)
@@ -186,11 +168,13 @@ def get_system_prompt(mode):
 
 def session_loop(mode):
 	"""個別のモード内での対話ループ"""
-
 	print(f"\n--- モード{mode} 開始 (終了するには 'quit' と入力) ---")
 	print("※ テキスト入力、または何も入力せずEnterを押すと音声入力になります。")
 
 	send_to_c_server("INIT", mode)
+
+	system_prompt = get_system_prompt(mode)
+	conversation_history = [system_prompt] if system_prompt else []
 
 	while True:
 		try:
@@ -213,15 +197,15 @@ def session_loop(mode):
 
 		if mode == Mode.FLAG:
 			normalized = unicodedata.normalize('NFKC', user_input)
-
 			hira_text = conv.do(normalized)
 			small_to_large = str.maketrans({
 				"ゃ": "や", "ゅ": "ゆ", "ょ": "よ",
 				"っ": "つ",
 				"ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お",
-
-				"1" or "１":"ひ", "2" or "２":"ふ", "3" or "３":"み", "4" or "４":"よ", "5" or "５":"い",
-				  "6" or "６":"む", "7" or "７":"な", "8" or "８":"や", "9" or "９":"ここの", "0" or "０":"ぜろ",
+				"1":"ひ", "１":"ひ", "2":"ふ", "２":"ふ", "3":"み", "３":"み", 
+				"4":"よ", "４":"よ", "5":"い", "５":"い", "6":"む", "６":"む", 
+				"7":"な", "７":"な", "8":"や", "８":"や", "9":"ここの", "９":"ここの", 
+				"0":"ぜろ", "０":"ぜろ",
 			})
 			hira_text = hira_text.translate(small_to_large)
 
@@ -231,14 +215,15 @@ def session_loop(mode):
 					cleaned += ch
 
 			full_response = cleaned
-
+			print("教官:", full_response)
+			
+			send_to_c_server(full_response, mode)
+			speak_text(full_response)
+			wait_for_c_animation()
+			continue
+			
 		elif mode == Mode.TALKING:
-			system_prompt = get_system_prompt(mode)
-			conversation_history = [system_prompt] if system_prompt else []
-
 			conversation_history.append({"role": "user", "content": user_input})
-
-			# AI応答生成
 			try:
 				response = client.chat.completions.create(
 					model="gpt-4o-mini",
@@ -249,14 +234,6 @@ def session_loop(mode):
 				print(f"API Error: {e}")
 				break
 
-		if mode == Mode.FLAG:
-			print("教官:", full_response)
-
-			send_to_c_server(full_response, mode)
-			speak_text(full_response)
-			wait_for_c_animation()
-			continue
-		elif mode == Mode.TALKING:
 			print("教官:", end=" ", flush=True)
 			full_response = ""
 			for chunk in response:
@@ -290,9 +267,8 @@ def main():
 		except KeyboardInterrupt:
 			break
 
-		# 音声入力処理
 		mode_text = raw_input
-		if not mode_text: # Enterのみの場合
+		if not mode_text:
 			voice_text = recognize_speech()
 			if voice_text:
 				mode_text = voice_text
